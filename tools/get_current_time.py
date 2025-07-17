@@ -4,10 +4,6 @@ import os
 from mcp_server import Tool, ToolDefinition, ToolFunction, ToolProperties, ToolParameter
 
 def _parse_timezone(tz_str: str) -> datetime.tzinfo | None:
-    """
-    Parses a string that can be a timezone name or a UTC offset.
-    Returns a tzinfo object or None if invalid.
-    """
     try:
         return pytz.timezone(tz_str)
     except pytz.exceptions.UnknownTimeZoneError:
@@ -23,17 +19,11 @@ def _parse_timezone(tz_str: str) -> datetime.tzinfo | None:
     return None
 
 def get_current_time(timezone: str | None = None) -> str:
-    """
-    Gets the current time in a specified timezone and returns it as an ISO 8601 string.
-    """
-    if not timezone:
-        target_tz = pytz.utc
-    else:
-        target_tz = _parse_timezone(timezone)
-
+    """Gets the current time and returns it as an ISO 8601 string."""
+    tz_to_use = timezone or os.getenv("DEFAULT_TIMEZONE", "UTC")
+    target_tz = _parse_timezone(tz_to_use)
     if target_tz is None:
-        return f"Error: Invalid timezone '{timezone}'. Use a name like 'Europe/London' or an offset like '-05:00'."
-
+        return f"Error: Invalid timezone '{tz_to_use}'. Use a name like 'Europe/London' or an offset like '-05:00'."
     utc_now = datetime.datetime.now(pytz.utc)
     local_time = utc_now.astimezone(target_tz)
     return local_time.isoformat()
@@ -41,12 +31,12 @@ def get_current_time(timezone: str | None = None) -> str:
 _GET_TIME_TOOL_DEFINITION = ToolDefinition(
     function=ToolFunction(
         name="get_current_time",
-        description="Get the current time for a given timezone and returns it in ISO 8601 format (e.g., '2025-07-17T20:05:00+00:00').",
+        description="Get the current time for a given timezone and returns it in ISO 8601 format.",
         parameters=ToolProperties(
             properties={
                 "timezone": ToolParameter(
                     type="string",
-                    description="The timezone name (e.g., 'America/New_York') or UTC offset (e.g., '-05:00'). Defaults to UTC."
+                    description="The timezone name (e.g., 'America/New_York') or UTC offset (e.g., '-05:00'). Defaults to the server's pre-configured timezone."
                 )
             }
         )

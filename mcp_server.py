@@ -1,8 +1,10 @@
 import importlib
 import pathlib
+import asyncio
 from typing import Callable
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, SkipValidation
+from pydantic import BaseModel, SkipValidation
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -34,11 +36,12 @@ class Tool(BaseModel):
     executor: SkipValidation[Callable]
 
 TOOLS_REGISTRY = {}
+STARTUP_HANDLERS = []
+SHUTDOWN_HANDLERS = []
 
-def discover_and_register_tools():
+def discover_and_register_modules():
     """
-    Dynamically discovers tools from the 'tools' directory.
-    It can handle files that provide a single 'tool' object or a list/tuple of 'tools'.
+    Dynamically discovers tools AND their lifecycle hooks from the 'tools' directory.
     """
     tools_dir = pathlib.Path(__file__).parent / "tools"
     for module_file in tools_dir.glob("*.py"):
@@ -54,39 +57,45 @@ def discover_and_register_tools():
                 candidate = getattr(module, 'tools')
                 if isinstance(candidate, (list, tuple)):
                     tools_to_register.extend(candidate)
-            if not tools_to_register:
-                print(f"Warning: No valid 'tool' or 'tools' object found in {module_name}")
-                continue
             for tool_instance in tools_to_register:
                 if isinstance(tool_instance, Tool):
                     tool_name = tool_instance.definition.function.name
-                    TOOLS_REGISTRY[tool_name] = {
-                        "definition": tool_instance.definition,
-                        "executor": tool_instance.executor
-                    }
+                    TOOLS_REGISTRY[tool_name] = tool_instance
                     print(f"Successfully registered tool: '{tool_name}' from {module_name}")
-                else:
-                    print(f"Warning: Found an invalid tool object in {module_name}")
+            if hasattr(module, 'on_startup'):
+                STARTUP_HANDLERS.append(getattr(module, 'on_startup'))
+                print(f"Registered 'on_startup' handler from {module_name}")
+            if hasattr(module, 'on_shutdown'):
+                SHUTDOWN_HANDLERS.append(getattr(module, 'on_shutdown'))
+                print(f"Registered 'on_shutdown' handler from {module_name}")
         except ImportError as e:
             print(f"Error importing {module_name}: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    TOOLS_REGISTRY.clear()
+    STARTUP_HANDLERS.clear()
+    SHUTDOWN_HANDLERS.clear()
+    discover_and_register_modules()
+    print("INFO:     Executing application startup handlers...")
+    for handler in STARTUP_HANDLERS:
+        await handler()
+    yield
+    print("INFO:     Executing application shutdown handlers...")
+    for handler in SHUTDOWN_HANDLERS:
+        await handler()
 
 app = FastAPI(
     title="Modular MCP Server",
     description="A modular MCP server that automatically discovers and serves tools.",
-    version="2.0.0"
+    version="2.2.0",
+    lifespan=lifespan
 )
-
-@app.on_event("startup")
-def on_startup():
-    """Register tools when the application starts up."""
-    TOOLS_REGISTRY.clear()
-    discover_and_register_tools()
 
 @app.get("/mcp/v1/tools", response_model=list[ToolDefinition], summary="MCP Tool Discovery")
 async def get_tools():
     """MCP Discovery Endpoint to list all dynamically loaded tools."""
-    return [tool["definition"] for tool in TOOLS_REGISTRY.values()]
-
+    return [tool.definition for tool in TOOLS_REGISTRY.values()]
 
 @app.post("/mcp/v1/tools/{tool_name}:execute", response_model=ToolExecutionResponse, summary="MCP Tool Execution")
 async def execute_tool(tool_name: str, request: ToolExecutionRequest):
@@ -94,9 +103,12 @@ async def execute_tool(tool_name: str, request: ToolExecutionRequest):
     if tool_name not in TOOLS_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found.")
 
-    tool_executor = TOOLS_REGISTRY[tool_name]["executor"]
+    tool_executor = TOOLS_REGISTRY[tool_name].executor
     try:
-        result = tool_executor(**request.arguments)
+        if asyncio.iscoroutinefunction(tool_executor):
+            result = await tool_executor(**request.arguments)
+        else:
+            result = tool_executor(**request.arguments)
         return ToolExecutionResponse(result=result)
     except TypeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid arguments for tool '{tool_name}': {e}")
