@@ -47,12 +47,22 @@ async def _get_mysql_schema_information(table_name: str | None = None) -> str:
     """Retrieves and formats allowlisted schema information."""
     if not DB_POOL:
         return "Error: Database connection is not available."
-    query = "SELECT TABLE_NAME, TABLE_COMMENT, COLUMN_NAME, COLUMN_COMMENT FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = %s"
+    query = """
+            SELECT t.TABLE_NAME, \
+                   t.TABLE_COMMENT, \
+                   c.COLUMN_NAME, \
+                   c.COLUMN_COMMENT
+            FROM INFORMATION_SCHEMA.TABLES t \
+                     JOIN \
+                 INFORMATION_SCHEMA.COLUMNS c ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+            WHERE t.TABLE_SCHEMA = %s \
+            """
     params = [os.getenv("DB_NAME")]
     if table_name:
-        query += " AND TABLE_NAME = %s"
+        query += " AND t.TABLE_NAME = %s"
         params.append(table_name)
-    query += " ORDER BY TABLE_NAME, ORDINAL_POSITION;"
+
+    query += " ORDER BY t.TABLE_NAME, c.ORDINAL_POSITION;"
     async with DB_POOL.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cursor:
             await cursor.execute(query, tuple(params))
